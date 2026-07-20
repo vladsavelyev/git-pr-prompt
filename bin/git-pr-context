@@ -1,0 +1,66 @@
+#!/bin/sh
+# git-pr-context <repo-dir>
+# Prints a single tab-separated line:  <base>\t<pr_number>\t<pr_url>
+#
+#  base      the base branch, blank if none or == main. Preferred source is the
+#            OPEN PR's actual baseRefName (authoritative, survives retargeting);
+#            falls back to git-town's recorded parent when there is no PR.
+#  pr_*      number + url of the OPEN PR for the branch, blank if none
+#
+# git-town's parent is a local git-config read (instant, free) but can drift
+# from the PR's real base when a PR is retargeted without `git town sync`, so
+# the live PR base wins when a PR exists.
+#
+# The PR lookup shells out to `gh` (~0.6s), so this script NEVER blocks on it:
+# it prints whatever is cached and, if the cache is missing/stale, kicks off a
+# detached background refresh (guarded by a lock so repeated prompt renders
+# don't pile up `gh` processes). Consequence: on a brand-new branch the PR
+# info appears one prompt render late. That is the right trade for a prompt.
+
+dir=${1:-$PWD}
+
+branch=$(git -C "$dir" -c core.fileMode=false rev-parse --abbrev-ref HEAD 2>/dev/null) || exit 0
+[ -z "$branch" ] && exit 0
+[ "$branch" = "HEAD" ] && exit 0   # detached HEAD — nothing meaningful to show
+
+# --- git-town parent (instant, local git config; used as fallback) ----------
+gt_parent=$(git -C "$dir" config --get "git-town-branch.${branch}.parent" 2>/dev/null)
+
+# --- PR (cache read is instant; refresh is always detached) -----------------
+top=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)
+cache_dir="${TMPDIR:-/tmp}/git-pr-context"
+mkdir -p "$cache_dir" 2>/dev/null
+key=$(printf '%s\n%s' "$top" "$branch" | shasum | cut -c1-16)
+cache="$cache_dir/$key"
+lock="$cache.lock"
+ttl=300
+
+now=$(date +%s)
+stale=1
+if [ -f "$cache" ]; then
+    mtime=$(stat -f %m "$cache" 2>/dev/null || echo 0)
+    [ $(( now - mtime )) -lt "$ttl" ] && stale=0
+fi
+
+if [ "$stale" = 1 ]; then
+    # mkdir is atomic: only one render wins the lock and spawns gh.
+    if mkdir "$lock" 2>/dev/null; then
+        (
+            info=$(cd "$dir" && gh pr view "$branch" --json number,url,state,baseRefName \
+                --jq 'select(.state=="OPEN") | "\(.number)\t\(.url)\t\(.baseRefName)"' 2>/dev/null)
+            printf '%s' "$info" > "$cache.tmp.$$" 2>/dev/null && mv "$cache.tmp.$$" "$cache" 2>/dev/null
+            rmdir "$lock" 2>/dev/null
+        ) >/dev/null 2>&1 &
+    fi
+fi
+
+pr=$(cat "$cache" 2>/dev/null)
+pr_number=$(printf '%s' "$pr" | cut -f1)
+pr_url=$(printf '%s' "$pr" | cut -f2)
+pr_base=$(printf '%s' "$pr" | cut -f3)
+
+# Prefer the PR's real base branch; fall back to git-town's recorded parent.
+base=${pr_base:-$gt_parent}
+[ "$base" = "main" ] && base=""   # don't show the boring common case
+
+printf '%s\t%s\t%s' "$base" "$pr_number" "$pr_url"
