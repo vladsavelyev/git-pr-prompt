@@ -43,6 +43,13 @@ if [ -f "$cache" ]; then
 fi
 
 if [ "$stale" = 1 ]; then
+    # An orphaned lock (background job died before its rmdir — machine slept,
+    # process killed) would otherwise wedge the refresh forever and serve the
+    # stale cache indefinitely. Steal any lock older than the gh timeout.
+    if [ -d "$lock" ]; then
+        lock_mtime=$(stat -f %m "$lock" 2>/dev/null || echo 0)
+        [ $(( now - lock_mtime )) -gt 60 ] && rmdir "$lock" 2>/dev/null
+    fi
     # mkdir is atomic: only one render wins the lock and spawns gh.
     if mkdir "$lock" 2>/dev/null; then
         (
