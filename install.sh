@@ -22,23 +22,31 @@ P10K="$HOME/.p10k.zsh"
 SETTINGS="$HOME/.claude/settings.json"
 BIN_SRC="$REPO/bin/git-pr-context"
 BIN_DST="$HOME/.local/bin/git-pr-context"
+SPEND_SRC="$REPO/bin/claude-spend"
+SPEND_DST="$HOME/.local/bin/claude-spend"
 SNIPPET="$REPO/snippets/p10k-prcontext.zsh"
 STATUSLINE_CMD_FILE="$REPO/snippets/statusline.command"
 
 info() { printf '  %s\n' "$*"; }
 step() { printf '\n== %s\n' "$*"; }
 
-# --- 1. helper on PATH ------------------------------------------------------
-step "bin/git-pr-context -> $BIN_DST"
-if [ -L "$BIN_DST" ] && [ "$(readlink "$BIN_DST")" = "$BIN_SRC" ]; then
-  info "already symlinked"
-elif [ "$CHECK" = 1 ]; then
-  info "WOULD symlink (currently: $( [ -e "$BIN_DST" ] && echo exists || echo missing ))"
-else
-  mkdir -p "$(dirname "$BIN_DST")"
-  ln -sfn "$BIN_SRC" "$BIN_DST"
-  info "symlinked"
-fi
+# --- 1. helpers on PATH -----------------------------------------------------
+link_bin() {
+  local src="$1" dst="$2"
+  step "$(basename "$src") -> $dst"
+  if [ -L "$dst" ] && [ "$(readlink "$dst")" = "$src" ]; then
+    info "already symlinked"
+  elif [ "$CHECK" = 1 ]; then
+    info "WOULD symlink (currently: $( [ -e "$dst" ] && echo exists || echo missing ))"
+  else
+    mkdir -p "$(dirname "$dst")"
+    ln -sfn "$src" "$dst"
+    info "symlinked"
+  fi
+}
+
+link_bin "$BIN_SRC" "$BIN_DST"
+link_bin "$SPEND_SRC" "$SPEND_DST"
 
 case ":$PATH:" in
   *":$HOME/.local/bin:"*) ;;

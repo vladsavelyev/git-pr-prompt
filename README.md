@@ -65,6 +65,45 @@ The installer is idempotent and secret-safe:
 If you already customized your statusline, splice in just the fragment from
 `snippets/statusline.md` rather than letting the installer overwrite it.
 
+## `claude-spend` — token & money spending
+
+[`bin/claude-spend`](./bin/claude-spend) reports what you've spent in Claude
+Code over a period, split by model. It reads the local transcripts under
+`~/.claude/projects/**/*.jsonl` — no network, no API key.
+
+```sh
+claude-spend                 # this month (default)
+claude-spend today
+claude-spend last-day        # yesterday
+claude-spend this-week last-week this-month last-month lifetime
+claude-spend --all           # one summary row per period
+claude-spend --json today    # machine-readable
+```
+
+```
+Claude spend — this-month
+  model                       cost        in       out   cache rd   cache wr   hit%    msgs  convos
+  claude-opus-4-8          $612.30    3.06M    11.79M      2.62B    100.26M    96%   15824     176
+  claude-sonnet-5           $25.61   105.4k    737.2k     27.42M      1.60M    94%     419      20
+  TOTAL                    $637.91    3.16M    12.55M      2.67B    103.21M    96%   16870     195
+```
+
+Two things worth knowing about how the numbers are produced:
+
+- **Cost is computed, not recorded.** The transcripts store token counts but not
+  dollars, so `claude-spend` multiplies tokens by per-model pricing baked into
+  the script (`PRICING` at the top — edit it when prices change). Cache reads
+  bill at 0.1×, 5-min cache writes at 1.25×, 1-hour writes at 2× the input rate.
+  A model with no price entry is billed as `$0` and flagged.
+- **Everything is deduplicated by message id.** Resuming or forking a session
+  copies its messages into a new transcript file, so the same API response shows
+  up in several files. Counting them all would roughly double every number, so
+  each message id is tallied once.
+
+`convos` = distinct sessions, `msgs` = assistant turns, `hit%` = cache-read
+tokens as a share of all input tokens. The installer symlinks it into
+`~/.local/bin/` alongside `git-pr-context`.
+
 ## Troubleshooting
 
 - **Base/PR not showing** — the cache refreshes in the background; give it one
