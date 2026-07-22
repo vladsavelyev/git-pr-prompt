@@ -11,6 +11,7 @@ transcripts), and aggregates by period, split by model.
   claude-spend this-week last-week this-month last-month lifetime
   claude-spend --all           # one row per period, totals only
   claude-spend --json this-month
+  claude-spend open            # build an HTML dashboard and open it
 
 Metrics: token spending (input / output / cache read / cache write), money
 spending (USD), cache hit rate, convos (distinct sessions), messages (assistant
@@ -23,9 +24,13 @@ Every number here is deduplicated by message id, or it would inflate ~2x.
 
 import argparse
 import glob
+import html
 import json
 import os
+import subprocess
 import sys
+import tempfile
+import webbrowser
 from collections import defaultdict
 from datetime import datetime, timedelta
 
@@ -159,6 +164,7 @@ def collect(now):
 
     bounds = period_bounds(now)
     stats = {p: defaultdict(new_stats) for p in PERIODS}
+    daily = defaultdict(float)  # date iso -> cost, for the trend chart
     seen = set()
     unpriced = set()
 
@@ -217,6 +223,8 @@ def collect(now):
 
                 session = obj.get("sessionId") or obj.get("session_id") or path
 
+                daily[d.isoformat()] += cost
+
                 for p in PERIODS:
                     if bounds[p](d):
                         s = stats[p][model]
@@ -229,7 +237,7 @@ def collect(now):
                         s["msgs"] += 1
                         s["sessions"].add(session)
 
-    return stats, unpriced
+    return stats, daily, unpriced
 
 
 # --- formatting -------------------------------------------------------------
@@ -356,6 +364,296 @@ def to_jsonable(models):
     return out
 
 
+# --- HTML dashboard ---------------------------------------------------------
+# Palette + method from the dataviz reference. Cost magnitude is one job (a
+# single measure, low->high), so it uses the sequential blue hue, not
+# categorical colors. Validated: node scripts/validate_palette.js with the
+# blue sequential ramp — a single-hue sequential ramp is safe by construction.
+
+def render_html(stats, daily, unpriced, now):
+    esc = html.escape
+
+    def money(x):
+        return f"${x:,.2f}"
+
+    def toks(n):
+        if n >= 1e9:
+            return f"{n / 1e9:.2f}B"
+        if n >= 1e6:
+            return f"{n / 1e6:.2f}M"
+        if n >= 1e3:
+            return f"{n / 1e3:.1f}k"
+        return str(int(n))
+
+    # KPI tiles: this-month headline + today + this-week + lifetime.
+    tm = merge(stats["this-month"])
+    td = merge(stats["today"])
+    tw = merge(stats["this-week"])
+    lt = merge(stats["lifetime"])
+
+    def tile(label, s, hero=False):
+        cls = "tile hero" if hero else "tile"
+        return f"""
+      <div class="{cls}">
+        <div class="tile-label">{esc(label)}</div>
+        <div class="tile-value">{money(s['cost'])}</div>
+        <div class="tile-sub">{toks(s['inp'] + s['out'] + s['cr'] + s['cw5'] + s['cw1'])} tokens · {cache_hit_rate(s):.0f}% cache · {len(s['sessions'])} convos</div>
+      </div>"""
+
+    tiles = "".join([
+        tile("This month", tm, hero=True),
+        tile("Today", td),
+        tile("This week", tw),
+        tile("Lifetime", lt),
+    ])
+
+    # Bar chart: cost by period (sequential blue, single measure).
+    bar_periods = ["today", "last-day", "this-week", "last-week",
+                   "this-month", "last-month"]
+    bar_labels = {"today": "Today", "last-day": "Yesterday",
+                  "this-week": "This week", "last-week": "Last week",
+                  "this-month": "This month", "last-month": "Last month"}
+    bar_vals = [(bar_labels[p], merge(stats[p])["cost"]) for p in bar_periods]
+    bmax = max((v for _, v in bar_vals), default=0) or 1
+    bar_rows = ""
+    for lbl, val in bar_vals:
+        pct = 100.0 * val / bmax
+        bar_rows += f"""
+        <div class="bar-row">
+          <div class="bar-name">{esc(lbl)}</div>
+          <div class="bar-track"><div class="bar-fill" style="width:{pct:.1f}%"></div></div>
+          <div class="bar-val">{money(val)}</div>
+        </div>"""
+
+    # Area trend: daily cost, last 30 days.
+    days = []
+    today = now.date()
+    for i in range(29, -1, -1):
+        d = today - timedelta(days=i)
+        days.append((d, daily.get(d.isoformat(), 0.0)))
+    dmax = max((v for _, v in days), default=0) or 1
+    W, H, PAD = 720, 200, 24
+    n = len(days)
+    step = (W - 2 * PAD) / (n - 1) if n > 1 else 0
+    pts = []
+    for i, (_, v) in enumerate(days):
+        x = PAD + i * step
+        y = H - PAD - (H - 2 * PAD) * (v / dmax)
+        pts.append((x, y))
+    line_path = "M" + " L".join(f"{x:.1f},{y:.1f}" for x, y in pts)
+    area_path = (
+        f"M{pts[0][0]:.1f},{H - PAD:.1f} L"
+        + " L".join(f"{x:.1f},{y:.1f}" for x, y in pts)
+        + f" L{pts[-1][0]:.1f},{H - PAD:.1f} Z"
+    )
+    dots = ""
+    for (d, v), (x, y) in zip(days, pts):
+        dots += (
+            f'<circle cx="{x:.1f}" cy="{y:.1f}" r="8" fill="transparent">'
+            f'<title>{d.isoformat()}: {money(v)}</title></circle>'
+        )
+    first_lbl = days[0][0].strftime("%b %-d")
+    last_lbl = days[-1][0].strftime("%b %-d")
+    peak = max(days, key=lambda dv: dv[1])
+
+    # Model table for this month, cost desc.
+    models = stats["this-month"]
+    trows = ""
+    for m in sorted(models, key=lambda k: models[k]["cost"], reverse=True):
+        s = models[m]
+        cw = s["cw5"] + s["cw1"]
+        trows += f"""
+        <tr>
+          <td class="model">{esc(m)}</td>
+          <td class="num">{money(s['cost'])}</td>
+          <td class="num">{toks(s['inp'])}</td>
+          <td class="num">{toks(s['out'])}</td>
+          <td class="num">{toks(s['cr'])}</td>
+          <td class="num">{toks(cw)}</td>
+          <td class="num">{cache_hit_rate(s):.0f}%</td>
+          <td class="num">{s['msgs']}</td>
+          <td class="num">{len(s['sessions'])}</td>
+        </tr>"""
+    total_cw = tm["cw5"] + tm["cw1"]
+    trows += f"""
+        <tr class="total-row">
+          <td class="model">TOTAL</td>
+          <td class="num">{money(tm['cost'])}</td>
+          <td class="num">{toks(tm['inp'])}</td>
+          <td class="num">{toks(tm['out'])}</td>
+          <td class="num">{toks(tm['cr'])}</td>
+          <td class="num">{toks(total_cw)}</td>
+          <td class="num">{cache_hit_rate(tm):.0f}%</td>
+          <td class="num">{tm['msgs']}</td>
+          <td class="num">{len(tm['sessions'])}</td>
+        </tr>"""
+
+    note = ""
+    if unpriced:
+        note = (
+            '<p class="note">Unpriced models billed as $0: '
+            + esc(", ".join(sorted(unpriced)))
+            + "</p>"
+        )
+
+    generated = now.strftime("%Y-%m-%d %H:%M")
+
+    return _HTML_TEMPLATE.format(
+        tiles=tiles,
+        bar_rows=bar_rows,
+        area_path=area_path,
+        line_path=line_path,
+        dots=dots,
+        first_lbl=esc(first_lbl),
+        last_lbl=esc(last_lbl),
+        peak_lbl=esc(peak[0].strftime("%b %-d")),
+        peak_val=money(peak[1]),
+        trows=trows,
+        note=note,
+        generated=esc(generated),
+        W=W,
+        H=H,
+    )
+
+
+_HTML_TEMPLATE = """<!DOCTYPE html>
+<html lang="en" data-theme="">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claude spend</title>
+<style>
+  :root {{
+    color-scheme: light;
+    --page: #f9f9f7; --surface: #fcfcfb;
+    --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+    --grid: #e1e0d9; --axis: #c3c2b7;
+    --blue: #2a78d6; --blue-soft: #cde2fb;
+    --border: rgba(11,11,11,0.10);
+  }}
+  @media (prefers-color-scheme: dark) {{
+    :root:not([data-theme="light"]) {{
+      color-scheme: dark;
+      --page: #0d0d0d; --surface: #1a1a19;
+      --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+      --grid: #2c2c2a; --axis: #383835;
+      --blue: #3987e5; --blue-soft: #184f95;
+      --border: rgba(255,255,255,0.10);
+    }}
+  }}
+  :root[data-theme="dark"] {{
+    color-scheme: dark;
+    --page: #0d0d0d; --surface: #1a1a19;
+    --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --axis: #383835;
+    --blue: #3987e5; --blue-soft: #184f95;
+    --border: rgba(255,255,255,0.10);
+  }}
+  * {{ box-sizing: border-box; }}
+  body {{
+    margin: 0; background: var(--page); color: var(--ink);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    padding: 32px 24px 64px;
+  }}
+  .wrap {{ max-width: 900px; margin: 0 auto; }}
+  header {{ display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 24px; }}
+  h1 {{ font-size: 20px; margin: 0; font-weight: 650; }}
+  .gen {{ color: var(--muted); font-size: 13px; }}
+  .toggle {{ background: none; border: 1px solid var(--border); color: var(--ink-2);
+    border-radius: 8px; padding: 4px 10px; font: inherit; font-size: 13px; cursor: pointer; }}
+  .kpis {{ display: grid; grid-template-columns: 2fr 1fr 1fr 1fr; gap: 12px; margin-bottom: 28px; }}
+  .tile {{ background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }}
+  .tile-label {{ color: var(--ink-2); font-size: 13px; margin-bottom: 8px; }}
+  .tile-value {{ font-size: 28px; font-weight: 650; letter-spacing: -0.02em; }}
+  .tile.hero .tile-value {{ font-size: 44px; }}
+  .tile-sub {{ color: var(--muted); font-size: 12px; margin-top: 6px; }}
+  .card {{ background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    padding: 20px; margin-bottom: 24px; }}
+  .card h2 {{ font-size: 14px; font-weight: 600; color: var(--ink-2); margin: 0 0 16px; }}
+  .bar-row {{ display: grid; grid-template-columns: 96px 1fr 80px; align-items: center; gap: 12px; margin-bottom: 10px; }}
+  .bar-name {{ font-size: 13px; color: var(--ink-2); }}
+  .bar-track {{ background: var(--grid); border-radius: 4px; height: 18px; overflow: hidden; }}
+  .bar-fill {{ background: var(--blue); height: 100%; border-radius: 4px; min-width: 2px; }}
+  .bar-val {{ font-size: 13px; text-align: right; font-variant-numeric: tabular-nums; }}
+  svg {{ width: 100%; height: auto; display: block; }}
+  .trend-meta {{ display: flex; justify-content: space-between; color: var(--muted);
+    font-size: 12px; margin-top: 6px; }}
+  table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
+  th, td {{ padding: 8px 10px; text-align: right; }}
+  th:first-child, td.model {{ text-align: left; }}
+  th {{ color: var(--muted); font-weight: 500; border-bottom: 1px solid var(--border); }}
+  td {{ border-bottom: 1px solid var(--grid); }}
+  td.num {{ font-variant-numeric: tabular-nums; }}
+  td.model {{ color: var(--ink-2); }}
+  .total-row td {{ font-weight: 650; border-bottom: none; border-top: 1px solid var(--border); }}
+  .note {{ color: var(--muted); font-size: 12px; }}
+  .foot {{ color: var(--muted); font-size: 12px; margin-top: 8px; line-height: 1.5; }}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Claude spend</h1>
+    <div>
+      <span class="gen">generated {generated}</span>
+      <button class="toggle" onclick="var r=document.documentElement;r.dataset.theme=r.dataset.theme==='dark'?'light':'dark'">theme</button>
+    </div>
+  </header>
+
+  <div class="kpis">{tiles}</div>
+
+  <div class="card">
+    <h2>Cost by period</h2>
+    {bar_rows}
+  </div>
+
+  <div class="card">
+    <h2>Daily cost — last 30 days</h2>
+    <svg viewBox="0 0 {W} {H}" role="img" aria-label="Daily cost, last 30 days">
+      <path d="{area_path}" fill="var(--blue-soft)" opacity="0.55"/>
+      <path d="{line_path}" fill="none" stroke="var(--blue)" stroke-width="2"
+            stroke-linejoin="round" stroke-linecap="round"/>
+      {dots}
+    </svg>
+    <div class="trend-meta">
+      <span>{first_lbl}</span>
+      <span>peak {peak_lbl}: {peak_val}</span>
+      <span>{last_lbl}</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>By model — this month</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>model</th><th>cost</th><th>in</th><th>out</th>
+          <th>cache rd</th><th>cache wr</th><th>hit%</th><th>msgs</th><th>convos</th>
+        </tr>
+      </thead>
+      <tbody>{trows}</tbody>
+    </table>
+    {note}
+  </div>
+
+  <p class="foot">Cost is computed from token counts &times; per-model pricing (not
+  recorded in transcripts). Every message is deduplicated by id, since resumed and
+  forked sessions copy messages across transcript files.</p>
+</div>
+</body>
+</html>
+"""
+
+
+def open_in_browser(path):
+    url = "file://" + os.path.abspath(path)
+    # On macOS `open` is the most reliable; fall back to the stdlib elsewhere.
+    if sys.platform == "darwin":
+        subprocess.run(["open", url], check=False)
+    else:
+        webbrowser.open(url)
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Report Claude Code token/money spending over a period."
@@ -372,14 +670,33 @@ def main():
         help="show every period as a summary row (totals only)",
     )
     ap.add_argument("--json", action="store_true", help="emit JSON instead of a table")
+    ap.add_argument(
+        "--open",
+        action="store_true",
+        help="build an HTML dashboard and open it in your browser",
+    )
     args = ap.parse_args()
+
+    # `claude-spend open` is a friendly alias for `claude-spend --open`.
+    if args.period == "open":
+        args.open = True
+        args.period = DEFAULT_PERIOD
 
     period = ALIASES.get(args.period, args.period)
     if not args.all and period not in PERIODS:
         ap.error(f"unknown period {args.period!r}; choose from: {', '.join(PERIODS)}")
 
     now = datetime.now()
-    stats, unpriced = collect(now)
+    stats, daily, unpriced = collect(now)
+
+    if args.open:
+        doc = render_html(stats, daily, unpriced, now)
+        path = os.path.join(tempfile.gettempdir(), "claude-spend.html")
+        with open(path, "w") as fh:
+            fh.write(doc)
+        print(f"wrote {path}")
+        open_in_browser(path)
+        return
 
     if args.json:
         if args.all:

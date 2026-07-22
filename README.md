@@ -78,7 +78,12 @@ claude-spend last-day        # yesterday
 claude-spend this-week last-week this-month last-month lifetime
 claude-spend --all           # one summary row per period
 claude-spend --json today    # machine-readable
+claude-spend open            # build an HTML dashboard and open it in your browser
 ```
+
+`claude-spend open` writes a self-contained HTML dashboard (KPI tiles, a
+cost-by-period bar chart, a 30-day daily-cost trend, and the by-model table) to
+a temp file and opens it — light/dark aware, no dependencies, no network.
 
 ```
 Claude spend — this-month
