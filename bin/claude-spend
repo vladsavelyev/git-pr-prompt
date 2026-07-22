@@ -156,10 +156,21 @@ def new_stats():
 def iter_records(files, seen):
     """Yield unique (obj, msg) assistant records that carry a usage block.
 
-    `seen` is a set of already-emitted message ids, mutated in place — pass the
-    same set across files so resumed/forked sessions (which copy messages into
-    new transcripts) are counted once.
+    Deduplication is by message id, keeping the row with the largest
+    `output_tokens`. This matters because a streamed turn writes the SAME
+    message id several times — partial-usage rows during generation (tiny
+    `output_tokens`) followed by the final complete row. Keeping the first
+    occurrence would tally the partial and undercount; keeping the max keeps
+    the final, complete usage. All other usage fields (input, cache) are
+    identical across a turn's rows, so max-output is a safe selector.
+
+    Resumed/forked sessions copy whole messages into new transcript files, so
+    the same id also appears verbatim across files — those collapse to one row
+    too. `seen` is a set of already-emitted ids, mutated in place so callers
+    can share dedup state across multiple iter_records() calls.
     """
+    best = {}  # mid -> (obj, msg, output_tokens), keeping max output_tokens
+    ordered = []  # mids in first-seen order, for stable output
     for path in files:
         with open(path, errors="replace") as fh:
             for line in fh:
@@ -178,13 +189,24 @@ def iter_records(files, seen):
                 msg = obj.get("message")
                 if not isinstance(msg, dict):
                     continue
-                if not msg.get("usage"):
+                usage = msg.get("usage")
+                if not usage:
                     continue
                 mid = msg.get("id") or obj.get("uuid")
                 if mid in seen:
                     continue
-                seen.add(mid)
-                yield obj, msg
+                out = usage.get("output_tokens", 0) or 0
+                prev = best.get(mid)
+                if prev is None:
+                    best[mid] = (obj, msg, out)
+                    ordered.append(mid)
+                elif out > prev[2]:
+                    best[mid] = (obj, msg, out)
+
+    for mid in ordered:
+        seen.add(mid)
+        obj, msg, _ = best[mid]
+        yield obj, msg
 
 
 def usage_tokens(usage):

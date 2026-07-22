@@ -109,10 +109,14 @@ Two things worth knowing about how the numbers are produced:
   the script (`PRICING` at the top — edit it when prices change). Cache reads
   bill at 0.1×, 5-min cache writes at 1.25×, 1-hour writes at 2× the input rate.
   A model with no price entry is billed as `$0` and flagged.
-- **Everything is deduplicated by message id.** Resuming or forking a session
-  copies its messages into a new transcript file, so the same API response shows
-  up in several files. Counting them all would roughly double every number, so
-  each message id is tallied once.
+- **Everything is deduplicated by message id, keeping the largest row.**
+  Resuming or forking a session copies its messages into a new transcript file,
+  so the same API response shows up in several files. Counting them all would
+  roughly double every number, so each message id is tallied once. A streamed
+  turn also writes its message id several times *within* one file — partial-usage
+  rows during generation (tiny `output_tokens`) then the final complete row — so
+  dedup keeps the row with the most `output_tokens` (the final one), not the
+  first seen; keeping the first would undercount every streamed turn.
 
 `convos` = distinct sessions, `msgs` = assistant turns, `hit%` = cache-read
 tokens as a share of all input tokens. The installer symlinks it into
