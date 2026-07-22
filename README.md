@@ -108,7 +108,10 @@ Two things worth knowing about how the numbers are produced:
   dollars, so `claude-spend` multiplies tokens by per-model pricing baked into
   the script (`PRICING` at the top — edit it when prices change). Cache reads
   bill at 0.1×, 5-min cache writes at 1.25×, 1-hour writes at 2× the input rate.
-  A model with no price entry is billed as `$0` and flagged.
+  A model with no price entry is billed as `$0` and flagged. Time-bounded
+  promotional rates (`INTRO_PRICING`) are applied by the usage's own date — e.g.
+  Sonnet 5's $2/$10 introductory rate through 2026-08-31, reverting to the
+  $3/$15 sticker after — so historical periods stay priced correctly.
 - **Everything is deduplicated by message id, keeping the largest row.**
   Resuming or forking a session copies its messages into a new transcript file,
   so the same API response shows up in several files. Counting them all would

@@ -32,7 +32,7 @@ import sys
 import tempfile
 import webbrowser
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 PROJECTS_DIR = os.path.expanduser("~/.claude/projects")
 
@@ -53,6 +53,13 @@ PRICING = {
     "claude-sonnet-4-0": (3.0, 15.0),
     "claude-haiku-4-5": (1.0, 5.0),
     "claude-3-5-haiku": (0.80, 4.0),
+}
+
+# Time-bounded promotional pricing: model -> (intro_input, intro_output, last_day).
+# Applied to usage dated on/before last_day; the PRICING sticker applies after.
+# Sonnet 5 launched with a $2/$10 intro rate through 2026-08-31 (vs $3/$15).
+INTRO_PRICING = {
+    "claude-sonnet-5": (2.0, 10.0, date(2026, 8, 31)),
 }
 
 # Cache token cost as a multiple of the input price.
@@ -84,25 +91,43 @@ ALIASES = {
 }
 
 
-def price_for(model):
-    """Return (input, output) per-1M price, or None if the model is unpriced."""
+def _canonical_model(model):
+    """Resolve a model string to its PRICING key, or None if unknown."""
     if model in PRICING:
-        return PRICING[model]
+        return model
     # Strip a trailing -YYYYMMDD date snapshot (e.g. claude-haiku-4-5-20251001).
     parts = model.rsplit("-", 1)
     if len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 8:
-        base = parts[0]
-        if base in PRICING:
-            return PRICING[base]
+        if parts[0] in PRICING:
+            return parts[0]
     # Longest known prefix.
     for key in sorted(PRICING, key=len, reverse=True):
         if model.startswith(key):
-            return PRICING[key]
+            return key
     return None
 
 
-def record_cost(model, inp, cw5, cw1, cr, out):
-    price = price_for(model)
+def price_for(model, on=None):
+    """Return (input, output) per-1M price, or None if the model is unpriced.
+
+    `on` is the usage date (a `date`); when a model has time-bounded intro
+    pricing that covers that date, the intro rate is returned instead of the
+    sticker. `on=None` uses the sticker rate (used only for the unpriced check).
+    """
+    key = _canonical_model(model)
+    if key is None:
+        return None
+    if on is not None:
+        intro = INTRO_PRICING.get(key)
+        if intro is not None:
+            in_p, out_p, last_day = intro
+            if on <= last_day:
+                return (in_p, out_p)
+    return PRICING[key]
+
+
+def record_cost(model, inp, cw5, cw1, cr, out, on=None):
+    price = price_for(model, on)
     if price is None:
         return 0.0
     pin, pout = price
@@ -250,7 +275,7 @@ def collect(now):
         model = msg.get("model", "unknown")
         inp, out, cr, cw5, cw1 = usage_tokens(msg["usage"])
 
-        cost = record_cost(model, inp, cw5, cw1, cr, out)
+        cost = record_cost(model, inp, cw5, cw1, cr, out, d)
         if price_for(model) is None and model != "<synthetic>":
             unpriced.add(model)
 
@@ -299,12 +324,19 @@ def session_stats(transcript_path):
     for obj, msg in iter_records(session_files(transcript_path), set()):
         model = msg.get("model", "unknown")
         inp, out, cr, cw5, cw1 = usage_tokens(msg["usage"])
+        ts = obj.get("timestamp")
+        d = None
+        if ts:
+            try:
+                d = datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone().date()
+            except ValueError:
+                d = None
         s["inp"] += inp
         s["out"] += out
         s["cr"] += cr
         s["cw5"] += cw5
         s["cw1"] += cw1
-        s["cost"] += record_cost(model, inp, cw5, cw1, cr, out)
+        s["cost"] += record_cost(model, inp, cw5, cw1, cr, out, d)
         s["msgs"] += 1
     return s
 
