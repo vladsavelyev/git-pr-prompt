@@ -42,11 +42,20 @@ PR number + model + a token-usage bar + two cost figures:
   **main agent only**: subagent (Task-tool) turns are written to separate
   `<session>/subagents/agent-*.jsonl` transcripts and are **not** folded into
   this number, so it undercounts whenever subagents are running.
-- `Σ$X.XX` (orange) — the **all-in** session cost from
-  [`claude-spend --session "$transcript_path"`](../bin/claude-spend), which
-  sums the main transcript plus every subagent transcript. This is the figure
-  that reflects what the session actually spent. The two are shown side by side
-  so you can see the subagent delta at a glance.
+- `Σ$X.XX` (orange) — the **all-in** session cost: Claude's live
+  `.cost.total_cost_usd` **plus** the subagent cost from disk, via
+  [`claude-spend --session "$transcript_path" --subagents-only --add "$cost"`](../bin/claude-spend).
+  This reflects what the session actually spent, main + subagents. The two are
+  shown side by side so you can see the subagent delta at a glance; with no
+  subagents running, `Σ$X.XX` equals `$X.XX` exactly.
+
+  Using the built-in figure as the base (rather than recomputing the main agent
+  from the transcript) keeps `Σ` **lag-free**. The statusline renders the
+  instant a turn completes, but that turn's transcript JSONL is flushed to disk
+  a beat later — so summing the main agent from disk would always trail by one
+  turn. `.cost.total_cost_usd` already includes the just-finished main turn;
+  subagent transcripts are complete once they return to the main loop, so adding
+  only the subagent portion from disk has no such lag.
 
 `install.sh` sets exactly this string as
 `.statusLine.command` in `~/.claude/settings.json` (via `jq`, leaving every

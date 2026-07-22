@@ -85,10 +85,15 @@ claude-spend --session <transcript.jsonl>   # one session's all-in cost (see bel
 `--session <transcript>` reports a single session's **all-in** cost — the main
 transcript *plus* every subagent transcript under its `<session>/subagents/`
 dir — and prints a bare `$X.XX` (or `--json`). It derives everything from the
-given transcript path, so it doesn't walk the whole projects tree. The
-statusline uses it (fed `.transcript_path`) to show `Σ$X.XX` next to Claude's
-built-in `$X.XX`; the built-in figure counts the main agent only, so the two
-diverge whenever subagents run. See [`snippets/statusline.md`](./snippets/statusline.md).
+given transcript path, so it doesn't walk the whole projects tree. Two extra
+flags support the statusline: `--subagents-only` sums just the subagent
+transcripts, and `--add <USD>` adds a base amount before printing. The
+statusline combines them — `claude-spend --session "$transcript" --subagents-only
+--add "$cost"` — feeding Claude's live `.cost.total_cost_usd` as the base and
+adding only the subagent cost from disk. That shows `Σ$X.XX` next to the
+built-in `$X.XX` with no one-turn disk-flush lag (the built-in figure already
+has the just-finished main turn; subagents are flushed by the time they
+return). See [`snippets/statusline.md`](./snippets/statusline.md).
 
 `claude-spend open` writes a self-contained HTML dashboard (KPI tiles, a
 cost-by-period bar chart, a 30-day daily-cost trend, and the by-model table) to

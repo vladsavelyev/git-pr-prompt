@@ -298,10 +298,10 @@ def collect(now):
     return stats, daily, unpriced
 
 
-def session_files(transcript_path):
-    """Transcripts belonging to one session: its main transcript plus every
-    subagent (and nested subagent) transcript, which Claude Code stores under
-    a `<session_id>/` directory next to the main file.
+def subagent_files(transcript_path):
+    """The session's subagent (and nested-subagent) transcripts — everything
+    Claude Code stores under the `<session_id>/` directory next to the main
+    file. Excludes the main transcript itself.
 
     Derives everything from the known transcript path, so it never walks the
     whole projects tree — fast enough to run on every statusline render.
@@ -309,19 +309,17 @@ def session_files(transcript_path):
     if not os.path.exists(transcript_path):
         sys.exit(f"transcript not found: {transcript_path}")
     base = transcript_path[:-6] if transcript_path.endswith(".jsonl") else transcript_path
-    subs = glob.glob(os.path.join(base, "**", "*.jsonl"), recursive=True)
-    return [transcript_path] + subs
+    return glob.glob(os.path.join(base, "**", "*.jsonl"), recursive=True)
 
 
-def session_stats(transcript_path):
-    """Aggregate one session's spend across its main + subagent transcripts.
+def session_files(transcript_path):
+    """The main transcript plus every subagent transcript for one session."""
+    return [transcript_path] + subagent_files(transcript_path)
 
-    This is the all-in number the live statusline's `cost.total_cost_usd`
-    misses, because that field reflects only the main agent's turns while
-    subagent usage lives in separate transcript files.
-    """
+
+def _stats_over(files):
     s = new_stats()
-    for obj, msg in iter_records(session_files(transcript_path), set()):
+    for obj, msg in iter_records(files, set()):
         model = msg.get("model", "unknown")
         inp, out, cr, cw5, cw1 = usage_tokens(msg["usage"])
         ts = obj.get("timestamp")
@@ -339,6 +337,26 @@ def session_stats(transcript_path):
         s["cost"] += record_cost(model, inp, cw5, cw1, cr, out, d)
         s["msgs"] += 1
     return s
+
+
+def session_stats(transcript_path, subagents_only=False):
+    """Aggregate one session's spend from its transcripts.
+
+    Full mode (default) sums the main transcript plus every subagent
+    transcript — the all-in number the live statusline's `cost.total_cost_usd`
+    misses (that field reflects only the main agent's turns; subagent usage
+    lives in separate transcript files).
+
+    `subagents_only=True` sums just the subagent transcripts. The statusline
+    uses this and adds it to Claude's live `cost.total_cost_usd`: that gives a
+    lag-free all-in figure, because the built-in cost already covers the main
+    agent up to the turn that's rendering now (including the one not yet
+    flushed to disk), while subagent transcripts are complete once they return
+    to the main loop. Recomputing the main agent from disk instead would trail
+    by whatever turn just landed.
+    """
+    files = subagent_files(transcript_path) if subagents_only else session_files(transcript_path)
+    return _stats_over(files)
 
 
 # --- formatting -------------------------------------------------------------
@@ -783,16 +801,36 @@ def main():
         "transcript path (statusline gives .transcript_path); prints a bare "
         "'$X.XX' unless --json is given",
     )
+    ap.add_argument(
+        "--subagents-only",
+        action="store_true",
+        help="with --session: sum only the subagent transcripts (excludes the "
+        "main transcript). Pair with --add to combine with the statusline's "
+        "live main-agent cost without the one-turn disk-flush lag.",
+    )
+    ap.add_argument(
+        "--add",
+        type=float,
+        metavar="USD",
+        default=0.0,
+        help="with --session: add this many USD to the computed cost before "
+        "printing (statusline passes Claude's live .cost.total_cost_usd here).",
+    )
     args = ap.parse_args()
 
     # Single-session mode: the all-in figure the statusline's built-in
     # cost.total_cost_usd misses (subagent turns live in separate transcripts).
     if args.session:
-        s = session_stats(args.session)
+        s = session_stats(args.session, subagents_only=args.subagents_only)
+        total = s["cost"] + args.add
         if args.json:
-            print(json.dumps({"transcript": args.session, **to_jsonable({"_": s})["_"]}))
+            payload = {"transcript": args.session, **to_jsonable({"_": s})["_"]}
+            if args.add:
+                payload["added_usd"] = round(args.add, 4)
+                payload["total_usd"] = round(total, 4)
+            print(json.dumps(payload))
         else:
-            print(fmt_cost(s["cost"]))
+            print(fmt_cost(total))
         return
 
     # `claude-spend open` is a friendly alias for `claude-spend --open`.
