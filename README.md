@@ -79,7 +79,16 @@ claude-spend this-week last-week this-month last-month lifetime
 claude-spend --all           # one summary row per period
 claude-spend --json today    # machine-readable
 claude-spend open            # build an HTML dashboard and open it in your browser
+claude-spend --session <transcript.jsonl>   # one session's all-in cost (see below)
 ```
+
+`--session <transcript>` reports a single session's **all-in** cost — the main
+transcript *plus* every subagent transcript under its `<session>/subagents/`
+dir — and prints a bare `$X.XX` (or `--json`). It derives everything from the
+given transcript path, so it doesn't walk the whole projects tree. The
+statusline uses it (fed `.transcript_path`) to show `Σ$X.XX` next to Claude's
+built-in `$X.XX`; the built-in figure counts the main agent only, so the two
+diverge whenever subagents run. See [`snippets/statusline.md`](./snippets/statusline.md).
 
 `claude-spend open` writes a self-contained HTML dashboard (KPI tiles, a
 cost-by-period bar chart, a 30-day daily-cost trend, and the by-model table) to

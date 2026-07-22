@@ -153,21 +153,13 @@ def new_stats():
     }
 
 
-def collect(now):
-    """Parse all transcripts once. Return (stats, unpriced_models set).
+def iter_records(files, seen):
+    """Yield unique (obj, msg) assistant records that carry a usage block.
 
-    stats[period][model] -> aggregated dict.
+    `seen` is a set of already-emitted message ids, mutated in place — pass the
+    same set across files so resumed/forked sessions (which copy messages into
+    new transcripts) are counted once.
     """
-    files = glob.glob(os.path.join(PROJECTS_DIR, "**", "*.jsonl"), recursive=True)
-    if not files:
-        sys.exit(f"No transcripts found under {PROJECTS_DIR}")
-
-    bounds = period_bounds(now)
-    stats = {p: defaultdict(new_stats) for p in PERIODS}
-    daily = defaultdict(float)  # date iso -> cost, for the trend chart
-    seen = set()
-    unpriced = set()
-
     for path in files:
         with open(path, errors="replace") as fh:
             for line in fh:
@@ -186,58 +178,113 @@ def collect(now):
                 msg = obj.get("message")
                 if not isinstance(msg, dict):
                     continue
-                usage = msg.get("usage")
-                if not usage:
+                if not msg.get("usage"):
                     continue
-
                 mid = msg.get("id") or obj.get("uuid")
                 if mid in seen:
                     continue
                 seen.add(mid)
+                yield obj, msg
 
-                ts = obj.get("timestamp")
-                if not ts:
-                    continue
-                try:
-                    dt_local = datetime.fromisoformat(
-                        ts.replace("Z", "+00:00")
-                    ).astimezone()
-                except ValueError:
-                    continue
-                d = dt_local.date()
 
-                model = msg.get("model", "unknown")
-                inp = usage.get("input_tokens", 0) or 0
-                out = usage.get("output_tokens", 0) or 0
-                cr = usage.get("cache_read_input_tokens", 0) or 0
-                cc = usage.get("cache_creation") or {}
-                cw1 = cc.get("ephemeral_1h_input_tokens", 0) or 0
-                cw5 = cc.get("ephemeral_5m_input_tokens", 0) or 0
-                if not cc:
-                    # Older/rolled-up shape: attribute all creation to 5m.
-                    cw5 = usage.get("cache_creation_input_tokens", 0) or 0
+def usage_tokens(usage):
+    """(input, output, cache_read, cache_write_5m, cache_write_1h) from a usage block."""
+    inp = usage.get("input_tokens", 0) or 0
+    out = usage.get("output_tokens", 0) or 0
+    cr = usage.get("cache_read_input_tokens", 0) or 0
+    cc = usage.get("cache_creation") or {}
+    cw1 = cc.get("ephemeral_1h_input_tokens", 0) or 0
+    cw5 = cc.get("ephemeral_5m_input_tokens", 0) or 0
+    if not cc:
+        # Older/rolled-up shape: attribute all creation to 5m.
+        cw5 = usage.get("cache_creation_input_tokens", 0) or 0
+    return inp, out, cr, cw5, cw1
 
-                cost = record_cost(model, inp, cw5, cw1, cr, out)
-                if price_for(model) is None and model != "<synthetic>":
-                    unpriced.add(model)
 
-                session = obj.get("sessionId") or obj.get("session_id") or path
+def collect(now):
+    """Parse all transcripts once. Return (stats, daily, unpriced_models set).
 
-                daily[d.isoformat()] += cost
+    stats[period][model] -> aggregated dict.
+    """
+    files = glob.glob(os.path.join(PROJECTS_DIR, "**", "*.jsonl"), recursive=True)
+    if not files:
+        sys.exit(f"No transcripts found under {PROJECTS_DIR}")
 
-                for p in PERIODS:
-                    if bounds[p](d):
-                        s = stats[p][model]
-                        s["inp"] += inp
-                        s["out"] += out
-                        s["cr"] += cr
-                        s["cw5"] += cw5
-                        s["cw1"] += cw1
-                        s["cost"] += cost
-                        s["msgs"] += 1
-                        s["sessions"].add(session)
+    bounds = period_bounds(now)
+    stats = {p: defaultdict(new_stats) for p in PERIODS}
+    daily = defaultdict(float)  # date iso -> cost, for the trend chart
+    unpriced = set()
+
+    for obj, msg in iter_records(files, set()):
+        ts = obj.get("timestamp")
+        if not ts:
+            continue
+        try:
+            dt_local = datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone()
+        except ValueError:
+            continue
+        d = dt_local.date()
+
+        model = msg.get("model", "unknown")
+        inp, out, cr, cw5, cw1 = usage_tokens(msg["usage"])
+
+        cost = record_cost(model, inp, cw5, cw1, cr, out)
+        if price_for(model) is None and model != "<synthetic>":
+            unpriced.add(model)
+
+        session = obj.get("sessionId") or obj.get("session_id")
+
+        daily[d.isoformat()] += cost
+
+        for p in PERIODS:
+            if bounds[p](d):
+                s = stats[p][model]
+                s["inp"] += inp
+                s["out"] += out
+                s["cr"] += cr
+                s["cw5"] += cw5
+                s["cw1"] += cw1
+                s["cost"] += cost
+                s["msgs"] += 1
+                s["sessions"].add(session)
 
     return stats, daily, unpriced
+
+
+def session_files(transcript_path):
+    """Transcripts belonging to one session: its main transcript plus every
+    subagent (and nested subagent) transcript, which Claude Code stores under
+    a `<session_id>/` directory next to the main file.
+
+    Derives everything from the known transcript path, so it never walks the
+    whole projects tree — fast enough to run on every statusline render.
+    """
+    if not os.path.exists(transcript_path):
+        sys.exit(f"transcript not found: {transcript_path}")
+    base = transcript_path[:-6] if transcript_path.endswith(".jsonl") else transcript_path
+    subs = glob.glob(os.path.join(base, "**", "*.jsonl"), recursive=True)
+    return [transcript_path] + subs
+
+
+def session_stats(transcript_path):
+    """Aggregate one session's spend across its main + subagent transcripts.
+
+    This is the all-in number the live statusline's `cost.total_cost_usd`
+    misses, because that field reflects only the main agent's turns while
+    subagent usage lives in separate transcript files.
+    """
+    s = new_stats()
+    for obj, msg in iter_records(session_files(transcript_path), set()):
+        model = msg.get("model", "unknown")
+        inp, out, cr, cw5, cw1 = usage_tokens(msg["usage"])
+        s["inp"] += inp
+        s["out"] += out
+        s["cr"] += cr
+        s["cw5"] += cw5
+        s["cw1"] += cw1
+        s["cost"] += record_cost(model, inp, cw5, cw1, cr, out)
+        s["msgs"] += 1
+    return s
 
 
 # --- formatting -------------------------------------------------------------
@@ -675,7 +722,24 @@ def main():
         action="store_true",
         help="build an HTML dashboard and open it in your browser",
     )
+    ap.add_argument(
+        "--session",
+        metavar="TRANSCRIPT",
+        help="report just one session's all-in cost (main + subagents) from its "
+        "transcript path (statusline gives .transcript_path); prints a bare "
+        "'$X.XX' unless --json is given",
+    )
     args = ap.parse_args()
+
+    # Single-session mode: the all-in figure the statusline's built-in
+    # cost.total_cost_usd misses (subagent turns live in separate transcripts).
+    if args.session:
+        s = session_stats(args.session)
+        if args.json:
+            print(json.dumps({"transcript": args.session, **to_jsonable({"_": s})["_"]}))
+        else:
+            print(fmt_cost(s["cost"]))
+        return
 
     # `claude-spend open` is a friendly alias for `claude-spend --open`.
     if args.period == "open":

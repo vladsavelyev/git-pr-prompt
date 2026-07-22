@@ -36,8 +36,19 @@ status string).
 
 The complete statusline command used with this setup lives in
 [`statusline.command`](./statusline.command) — dir + branch + PR base + clickable
-PR number + model + a token-usage bar + session cost (`$X.XX` from
-`.cost.total_cost_usd`). `install.sh` sets exactly this string as
+PR number + model + a token-usage bar + two cost figures:
+
+- `$X.XX` (gold) — Claude Code's own `.cost.total_cost_usd`. This is the
+  **main agent only**: subagent (Task-tool) turns are written to separate
+  `<session>/subagents/agent-*.jsonl` transcripts and are **not** folded into
+  this number, so it undercounts whenever subagents are running.
+- `Σ$X.XX` (orange) — the **all-in** session cost from
+  [`claude-spend --session "$transcript_path"`](../bin/claude-spend), which
+  sums the main transcript plus every subagent transcript. This is the figure
+  that reflects what the session actually spent. The two are shown side by side
+  so you can see the subagent delta at a glance.
+
+`install.sh` sets exactly this string as
 `.statusLine.command` in `~/.claude/settings.json` (via `jq`, leaving every
 other key — including secrets — untouched). If you already have a customized
 statusline, splice in just the fragment above instead of overwriting.
