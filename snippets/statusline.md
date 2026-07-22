@@ -36,7 +36,8 @@ status string).
 
 The complete statusline command used with this setup lives in
 [`statusline.command`](./statusline.command) — dir + branch + PR base + clickable
-PR number + model + a token-usage bar. `install.sh` sets exactly this string as
+PR number + model + a token-usage bar + session cost (`$X.XX` from
+`.cost.total_cost_usd`). `install.sh` sets exactly this string as
 `.statusLine.command` in `~/.claude/settings.json` (via `jq`, leaving every
 other key — including secrets — untouched). If you already have a customized
 statusline, splice in just the fragment above instead of overwriting.
