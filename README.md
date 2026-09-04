@@ -95,6 +95,16 @@ built-in `$X.XX` with no one-turn disk-flush lag (the built-in figure already
 has the just-finished main turn; subagents are flushed by the time they
 return). See [`snippets/statusline.md`](./snippets/statusline.md).
 
+Cost is derived from token counts × the `PRICING` table in the script (the
+transcripts don't store cost), so a model released after the table was last
+updated is billed as $0. The period tables print a `note: unpriced models` line;
+`--session` has no room for that, so it appends a `?` to the figure (`Σ$4.20?`).
+A `?` in the statusline means **add the model to `PRICING`** — until you do, the
+number is an undercount, and if *every* model in the session is unpriced the
+subagent delta is exactly $0 and `Σ$` looks identical to the built-in `$`.
+`claude-spend --session <transcript> --json` lists the offenders under
+`unpriced_models`.
+
 `claude-spend open` writes a self-contained HTML dashboard (KPI tiles, a
 cost-by-period bar chart, a 30-day daily-cost trend, and the by-model table) to
 a temp file and opens it — light/dark aware, no dependencies, no network.

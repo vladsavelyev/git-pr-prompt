@@ -39,8 +39,11 @@ PROJECTS_DIR = os.path.expanduser("~/.claude/projects")
 # Per-1M-token pricing (input, output) in USD. Sourced from the Claude model
 # catalog. Models absent here are billed as $0 and flagged in the output.
 PRICING = {
+    "claude-fable-5-1": (10.0, 50.0),
+    "claude-mythos-5-1": (10.0, 50.0),
     "claude-fable-5": (10.0, 50.0),
     "claude-mythos-5": (10.0, 50.0),
+    "claude-opus-5": (5.0, 25.0),
     "claude-opus-4-8": (5.0, 25.0),
     "claude-opus-4-7": (5.0, 25.0),
     "claude-opus-4-6": (5.0, 25.0),
@@ -318,9 +321,13 @@ def session_files(transcript_path):
 
 
 def _stats_over(files):
+    """Aggregate stats over `files`. Returns (stats, unpriced_models set)."""
     s = new_stats()
+    unpriced = set()
     for obj, msg in iter_records(files, set()):
         model = msg.get("model", "unknown")
+        if price_for(model) is None and model != "<synthetic>":
+            unpriced.add(model)
         inp, out, cr, cw5, cw1 = usage_tokens(msg["usage"])
         ts = obj.get("timestamp")
         d = None
@@ -336,11 +343,11 @@ def _stats_over(files):
         s["cw1"] += cw1
         s["cost"] += record_cost(model, inp, cw5, cw1, cr, out, d)
         s["msgs"] += 1
-    return s
+    return s, unpriced
 
 
 def session_stats(transcript_path, subagents_only=False):
-    """Aggregate one session's spend from its transcripts.
+    """Aggregate one session's spend from its transcripts. -> (stats, unpriced).
 
     Full mode (default) sums the main transcript plus every subagent
     transcript — the all-in number the live statusline's `cost.total_cost_usd`
@@ -821,16 +828,22 @@ def main():
     # Single-session mode: the all-in figure the statusline's built-in
     # cost.total_cost_usd misses (subagent turns live in separate transcripts).
     if args.session:
-        s = session_stats(args.session, subagents_only=args.subagents_only)
+        s, unpriced = session_stats(args.session, subagents_only=args.subagents_only)
         total = s["cost"] + args.add
         if args.json:
             payload = {"transcript": args.session, **to_jsonable({"_": s})["_"]}
             if args.add:
                 payload["added_usd"] = round(args.add, 4)
                 payload["total_usd"] = round(total, 4)
+            if unpriced:
+                payload["unpriced_models"] = sorted(unpriced)
             print(json.dumps(payload))
         else:
-            print(fmt_cost(total))
+            # A model missing from PRICING is billed as $0, which would silently
+            # undercount — the statusline has no room for the note the table
+            # prints, so flag it inline with a '?'. Run `claude-spend --session
+            # <transcript> --json` to see which models are unpriced.
+            print(fmt_cost(total) + ("?" if unpriced else ""))
         return
 
     # `claude-spend open` is a friendly alias for `claude-spend --open`.
