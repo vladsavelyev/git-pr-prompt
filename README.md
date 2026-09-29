@@ -79,31 +79,20 @@ claude-spend this-week last-week this-month last-month lifetime
 claude-spend --all           # one summary row per period
 claude-spend --json today    # machine-readable
 claude-spend open            # build an HTML dashboard and open it in your browser
-claude-spend --session <transcript.jsonl>   # one session's all-in cost (see below)
+claude-spend --session <transcript.jsonl>   # one session's cost, main + subagents
 ```
 
-`--session <transcript>` reports a single session's **all-in** cost — the main
+`--session <transcript>` reports a single session's cost — the main
 transcript *plus* every subagent transcript under its `<session>/subagents/`
 dir — and prints a bare `$X.XX` (or `--json`). It derives everything from the
-given transcript path, so it doesn't walk the whole projects tree. Two extra
-flags support the statusline: `--subagents-only` sums just the subagent
-transcripts, and `--add <USD>` adds a base amount before printing. The
-statusline combines them — `claude-spend --session "$transcript" --subagents-only
---add "$cost"` — feeding Claude's live `.cost.total_cost_usd` as the base and
-adding only the subagent cost from disk. That shows `Σ$X.XX` next to the
-built-in `$X.XX` with no one-turn disk-flush lag (the built-in figure already
-has the just-finished main turn; subagents are flushed by the time they
-return). See [`snippets/statusline.md`](./snippets/statusline.md).
+given transcript path, so it doesn't walk the whole projects tree.
 
 Cost is derived from token counts × the `PRICING` table in the script (the
 transcripts don't store cost), so a model released after the table was last
 updated is billed as $0. The period tables print a `note: unpriced models` line;
-`--session` has no room for that, so it appends a `?` to the figure (`Σ$4.20?`).
-A `?` in the statusline means **add the model to `PRICING`** — until you do, the
-number is an undercount, and if *every* model in the session is unpriced the
-subagent delta is exactly $0 and `Σ$` looks identical to the built-in `$`.
-`claude-spend --session <transcript> --json` lists the offenders under
-`unpriced_models`.
+`--session` has no room for that, so it appends a `?` to the figure (`$4.20?`)
+— that means **add the model to `PRICING`**. `claude-spend --session
+<transcript> --json` lists the offenders under `unpriced_models`.
 
 `claude-spend open` writes a self-contained HTML dashboard (KPI tiles, a
 cost-by-period bar chart, a 30-day daily-cost trend, and the by-model table) to
@@ -121,8 +110,10 @@ Two things worth knowing about how the numbers are produced:
 
 - **Cost is computed, not recorded.** The transcripts store token counts but not
   dollars, so `claude-spend` multiplies tokens by per-model pricing baked into
-  the script (`PRICING` at the top — edit it when prices change). Cache reads
-  bill at 0.1×, 5-min cache writes at 1.25×, 1-hour writes at 2× the input rate.
+  the script (`PRICING` at the top — edit it when prices change). Each entry
+  carries its own cache-read rate — usually 0.1× input, but 0.05× on Opus 5.5
+  and 0.025× on Fable/Mythos 5.1; 5-min cache writes bill at 1.25×, 1-hour
+  writes at 2× the input rate.
   A model with no price entry is billed as `$0` and flagged. Time-bounded
   promotional rates (`INTRO_PRICING`) are applied by the usage's own date — e.g.
   Sonnet 5's $2/$10 introductory rate through 2026-08-31, reverting to the
