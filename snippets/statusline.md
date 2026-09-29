@@ -36,7 +36,8 @@ status string).
 
 The complete statusline command used with this setup lives in
 [`statusline.command`](./statusline.command) — dir + branch + PR base + clickable
-PR number + model + a token-usage bar + two cost figures:
+PR number + model + reasoning effort (`· high`, from `.effort.level`; omitted
+when the model has no effort parameter) + a token-usage bar + two cost figures:
 
 - `$X.XX` (gold) — Claude Code's own `.cost.total_cost_usd`. This is the
   **main agent only**: subagent (Task-tool) turns are written to separate
